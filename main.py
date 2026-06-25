@@ -2,8 +2,8 @@ WIDTH = 32
 class Registers:
     def __init__(self):
         self._regs = [0] * WIDTH
-        for i in range(WIDTH):
-            self._regs[i] = i
+        # for i in range(WIDTH):
+        #     self._regs[i] = i
         self.name_map = {
             'zero': 0, 'at': 1, 'v0': 2, 'v1': 3,
             'a0': 4, 'a1': 5, 'a2': 6, 'a3': 7,
@@ -41,11 +41,15 @@ class CPUCore:
         # print(f"bincode={bin_code[:6][::-1]}:{bin_code[6:11][::-1]}:{int(bin_code[11:16][::-1],2)}:{int(bin_code[16:21][::-1],2)}:{int(bin_code[21:26][::-1],2)}:{bin_code[26:]}")
         rs = self.registers.get_register_by_index(int(bin_code[21:26][::-1], 2))
         rt = self.registers.get_register_by_index(int(bin_code[16:21][::-1], 2))
-        rd = self.registers.get_register_by_index(int(bin_code[11:16][::-1], 2))
-        # print(f"rs({int(bin_code[21:26][::-1], 2)}): {rs}, rt({int(bin_code[16:21][::-1], 2)}): {rt}, rd({int(bin_code[11:16][::-1], 2)}): {rd}")
+        rd_index = int(bin_code[11:16][::-1], 2)
+        # print(f"rs({int(bin_code[21:26][::-1], 2)}): {rs}, rt({int(bin_code[16:21][::-1], 2)}): {rt}")
+        
+        immt = int(bin_code[0:16][::-1], 2) #sign extend todo
+        print(f"imm: {immt}")
         # EX
-        if control_signals["alu_src"]:  #ALUSrc multiplexor
-            op_b = int(bin_code[3])  # immediate value
+        print(control_signals["alu_src"])
+        if control_signals["alu_src"]:  #alu_src multiplexor
+            rt = immt  # immediate value
             # print(f"ALUSrc is 1, using constant {op_b} as op_b")
         ALU_control_signals = self.ALU_control_unit(bin_code[0:6][::-1], control_signals["alu_op1"], control_signals["alu_op0"])
         alu_result, zero_flag = self.ALU_32(ALU_control_signals, rs, rt)
@@ -56,11 +60,16 @@ class CPUCore:
         if self.exception:
             print(f"Exception: {self.exception}")
             return
-        if not self.overflow:
-            self.registers.set_register_by_index(int(bin_code[11:16][::-1], 2), alu_result)
-        else:
+        if self.overflow:
             print("Overflow occurred. Result not written to register.")
-            self.overflow = 0  # Reset overflow flag after handling
+        self.overflow = 0  # Reset overflow flag after handling
+        # print(control_signals["reg_dst"])
+        if control_signals["reg_dst"]:
+            regd = rd_index
+        else:
+            regd = int(bin_code[16:21][::-1], 2)
+        if control_signals["reg_write"]:
+            self.registers.set_register_by_index(regd, alu_result)
     def Instruction_Format(self, instruction):
 
         return instruction
@@ -80,25 +89,26 @@ class CPUCore:
         op = []
         for i in range(6):
             op.append(int(opcode[5-i]))
-        r_type, lw, sw, beq = 0,0,0,0
-        r_type = (not op[5]) and (not op[4]) and (not op[3]) and (not op[2]) and (not op[1]) and (not op[0])
-        lw = op[5] and (not op[4]) and (not op[3]) and (not op[2]) and op[1] and op[0]
-        sw = op[5] and (not op[4]) and op[3] and (not op[2]) and op[1] and op[0]
-        beq = (not op[5]) and (not op[4]) and (not op[3]) and op[2] and (not op[1]) and (not op[0])
+        r_type, lw, sw, beq, addi = 0,0,0,0,0
+        r_type = (not op[5]) and (not op[4]) and (not op[3]) and (not op[2]) and (not op[1]) and (not op[0]) #000000
+        lw = op[5] and op[4] and (not op[3]) and (not op[2]) and (not op[1]) and op[0] #100011
+        sw = op[5] and op[4] and (not op[3]) and op[2] and (not op[1]) and op[0] #101011
+        beq = (not op[5]) and (not op[4]) and op[3] and (not op[2]) and (not op[1]) and (not op[0]) #000100
+        addi = (not op[5]) and (not op[4]) and (not op[3]) and op[2] and (not op[1]) and (not op[0]) #00100
         # r_type = bool(r_type)
         # lw = bool(lw)
         # sw = bool(sw)
         # beq = bool(beq)
         signals["reg_dst"] = r_type
-        signals["alu_src"] = (lw or sw)
+        signals["alu_src"] = (lw or sw or addi)
         signals["mem_to_reg"] = lw
-        signals["reg_write"] = (r_type or lw )
+        signals["reg_write"] = (r_type or lw or addi)
         signals["mem_read"] = lw
         signals["mem_write"] = sw
         signals["branch"] = beq
         signals["ext_op"] = 0
-        signals["alu_op1"] = r_type
-        signals["alu_op0"] = beq
+        signals["alu_op1"] = r_type or addi
+        signals["alu_op0"] = beq or addi
         for key,value in signals.items():
             signals[key] = 1 if value else 0 # Formatting for clear looks <3
         # print(f"op: {op}")
@@ -126,6 +136,10 @@ class CPUCore:
                 signals[1] = 1
                 signals[2] = 1
                 signals[3] = 1
+        if alu_op1 ==1 and alu_op0 == 1:
+            signals[2] = 1 #addi
+            print("hi")
+
         # if opcode in ['and', 'or', 'add', 'sub', 'nor', 'slt', 'addi']: #plaintext ALU operations
         #     if opcode == 'and':
         #         # do nothing, default is 0,0
@@ -197,6 +211,8 @@ class Compiler:
     def __init__(self):
         self.reg_table = Registers()
         self.instructions = []
+        self.nop = f'{0:06b}' + f'{0:05b}' + f'{0:05b}' + f'{0:05b}' + f'{0:05b}' + f'{0:06b}'
+        self.exception = None
     def compile(self, cmd):
         cmd = cmd.replace("$", "").replace(",", " ").replace("\t", " ").strip().split()
         print(f"Decoded command: {cmd}")
@@ -220,8 +236,33 @@ class Compiler:
                 func_code = 0b100111
             elif inst == 'slt':
                 func_code = 0b101010
+            else:
+                self.exception = "Invalid R-type instruction"
+                bin_code = self.nop
+                return bin_code
             inst = f'{0:06b}'
             bin_code = f'{inst}'+bin_code[6:26] + f'{func_code:06b}'
+        elif inst in ['addi']:
+            if inst == 'addi':
+                inst = f'{0b001000:06b}'
+            else:
+                self.exception = "Invalid I-type instruction"
+                bin_code = self.nop
+                return bin_code
+            try:
+                immt = int(cmd[3])
+                if immt > 32767 or immt < -32768:
+                    self.exception = "Immediate value out of range"
+                    bin_code = self.nop
+                    return bin_code
+                immt = immt & 0xFFFF
+                print(f"bin_code before: {bin_code}")
+                bin_code = f'{inst}'+bin_code[6:16]+f'{immt:016b}'
+                print(f"bin_code after: {bin_code}")
+            except (ValueError, TypeError):
+                self.exception = "Invalid immediate value"
+                bin_code = self.nop
+                return bin_code
             # print(f"bincode={bin_code[:6]}:{bin_code[6:11]}:{bin_code[11:16]}:{bin_code[16:21]}:{bin_code[21:26]}:{bin_code[26:]}")
         # elif inst in ['addi']:
         #     inst = f'{0b00100000:06b}'
@@ -239,6 +280,7 @@ class Compiler:
         #     inst = bin(0b00000100)
         else:
             self.exception = "Invalid opcode"
+            bin_code = self.nop
         bin_code = bin_code[::-1] # little endian
         # print(f"bincode={bin_code[:6]}:{bin_code[6:11]}:{bin_code[11:16]}:{bin_code[16:21]}:{bin_code[21:26]}:{bin_code[26:]}")
         return bin_code
@@ -246,20 +288,29 @@ class Compiler:
         rs,rt,rd,shamt=0,0,0,0
         cmd_len = len(cmd)
         if cmd_len > 1:
-            rd = f'{self.reg_table.name_map[cmd[1]]& 0x1F:05b}'
-            bin_code = bin_code[:16] + rd + bin_code[21:]
+            try:
+                rd = f'{self.reg_table.name_map[cmd[1]]& 0x1F:05b}'
+            except (ValueError, TypeError, KeyError):
+                return bin_code
+            bin_code = bin_code[:6] + rd + bin_code[11:] # op:6, rd:5, other:21
         if cmd_len > 2:
-            rs = f'{self.reg_table.name_map[cmd[2]]& 0x1F:05b}'
-            bin_code = bin_code[:6] + rs + bin_code[11:]
+            try:
+                rs = f'{self.reg_table.name_map[cmd[2]]& 0x1F:05b}'
+            except (ValueError, TypeError, KeyError):
+                return bin_code
+            bin_code = bin_code[:6] + rs + bin_code[6:WIDTH-5] #op:6, rs:5, rd:5, other:16
         if cmd_len > 3:
-            rt = f'{self.reg_table.name_map[cmd[3]]& 0x1F:05b}'
-            bin_code = bin_code[:11] + rt + bin_code[16:]
+            try:
+                rt = f'{self.reg_table.name_map[cmd[3]]& 0x1F:05b}'
+            except (ValueError, TypeError, KeyError):
+                return bin_code
+            bin_code = bin_code[:11] + rt + bin_code[11:WIDTH-5] # op:6, rs:5, rd:5, rt:5, other:11
             try:
                 shamt_val = int(cmd[3]) & 0x1F
             except (ValueError, TypeError):
-                shamt_val = 0     
+                return bin_code
             shamt = f'{shamt_val:05b}'
-            bin_code = bin_code[:21] + shamt + bin_code[26:]
+            bin_code = bin_code[:21] + shamt + bin_code[21:WIDTH-5] # op:6, rs:5, rd:5, rt:5, shamt:5, other:6
         return bin_code
 
         
@@ -286,8 +337,15 @@ def interface():
                 print(" ".join(f"{k}: {v:032b}" for k, v in list(display.items())[i:i+4]))
             continue
         machine_code = Compiler_32.compile(cmd)
-        
+        if Compiler_32.exception:
+            print(f"Error: {Compiler_32.exception}")
+            Compiler_32.exception = None
+            continue
         CPU.execute(machine_code)
+        if CPU.exception:
+            print(f"Error: {CPU.exception}")
+            CPU.exception = None
+            continue
         display = registers.dump()
         for i in range(0, len(display), 4):
             print(" ".join(f"{k}: {v}" for k, v in list(display.items())[i:i+4]))

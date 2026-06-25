@@ -4,6 +4,7 @@ A MIPS32 Instruction Decoder implemented in Python while self-studying computer 
 
 Current Status:
 - R-type instructions supported
+- I-type (addi) instructions supported
 - ALU implemented
 - Control Unit implemented
 - Work in progress
@@ -16,6 +17,7 @@ Supported Instructions
 - or
 - nor
 - slt
+- addi
 
 Example
 ```assembly
