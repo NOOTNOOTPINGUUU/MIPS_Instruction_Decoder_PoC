@@ -1,7 +1,12 @@
 WIDTH = 32
+class ZeroTouchGround(list):
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        super().__setitem__(0, 0)
+
 class Registers:
     def __init__(self):
-        self._regs = [0] * WIDTH
+        self._regs = ZeroTouchGround([0] * WIDTH)
         # for i in range(WIDTH):
         #     self._regs[i] = i
         self.name_map = {
@@ -12,13 +17,10 @@ class Registers:
             't8': 24, 't9': 25, 'k0': 26, 'k1': 27, 'gp': 28, 'sp': 29, 'fp': 30, 'ra': 31
         }
     def set_register_by_index(self, index, value):
-        if index == 0:
-            return
         self._regs[index] = value
     def set_register(self, name, value):
         idx = self.name_map.get(name, 0)
-        if idx != 0:
-            self._regs[idx] = value
+        self._regs[idx] = value
     def get_register_by_index(self, index):
         return self._regs[index]
     def get_register_by_name(self, name):
@@ -33,41 +35,50 @@ class CPUCore:
         self.memory = [0] * (2**10) # 1KB of memory
         self.overflow = 0
         self.exception = None
+    def get_bits(self,val, start, end): #support function to extract bits from a value
+        length = end - start + 1
+        mask = (1 << length) - 1
+        return (val >> start) & mask
     def execute(self, bin_code):
         # IF
         bin_code = self.Instruction_Format(bin_code)
         # ID
-        control_signals = self.control_unit(bin_code[26:32])
+        # print(f"Executing instruction: {bin_code:032b}")
+        # print(f"self.get_bits(bin_code, 0, 5): {self.get_bits(bin_code, 26, 31):06b}")
+        control_signals = self.control_unit(self.get_bits(bin_code, 26, 31))
         # print(f"bincode={bin_code[:6][::-1]}:{bin_code[6:11][::-1]}:{int(bin_code[11:16][::-1],2)}:{int(bin_code[16:21][::-1],2)}:{int(bin_code[21:26][::-1],2)}:{bin_code[26:]}")
-        rs = self.registers.get_register_by_index(int(bin_code[21:26][::-1], 2))
-        rt = self.registers.get_register_by_index(int(bin_code[16:21][::-1], 2))
-        rd_index = int(bin_code[11:16][::-1], 2)
-        # print(f"rs({int(bin_code[21:26][::-1], 2)}): {rs}, rt({int(bin_code[16:21][::-1], 2)}): {rt}")
-        
-        immt = int(bin_code[0:16][::-1], 2) #sign extend todo
-        print(f"imm: {immt}")
+        rs = self.registers.get_register_by_index(self.get_bits(bin_code, 21, 25))
+        rt = self.registers.get_register_by_index(self.get_bits(bin_code, 16, 20))
+        rd_index = self.get_bits(bin_code, 11, 15)
+        # print(f"rs({self.get_bits(bin_code, 21, 25)}): {rs}, rt({self.get_bits(bin_code, 16, 20)}): {rt}")
+
+        immt = self.get_bits(bin_code, 0, 15) #sign extend todo
+        # print(f"imm: {immt}")
         # EX
-        print(control_signals["alu_src"])
+        # print(control_signals["alu_src"])
         if control_signals["alu_src"]:  #alu_src multiplexor
             rt = immt  # immediate value
             # print(f"ALUSrc is 1, using constant {op_b} as op_b")
-        ALU_control_signals = self.ALU_control_unit(bin_code[0:6][::-1], control_signals["alu_op1"], control_signals["alu_op0"])
+        # print(self.get_bits(bin_code, 0, 5), control_signals["alu_op1"], control_signals["alu_op0"])
+        ALU_control_signals = self.ALU_control_unit(self.get_bits(bin_code, 0, 5), control_signals["alu_op1"], control_signals["alu_op0"])
         alu_result, zero_flag = self.ALU_32(ALU_control_signals, rs, rt)
         # print(f"ALU result: {alu_result}, zero_flag: {zero_flag}")
-        
+        if self.overflow:
+            print("Overflow occurred. Result not written to register.")
+            self.overflow = 0  # Reset overflow flag after handling
+            return
         # MEM
         # WB
         if self.exception:
             print(f"Exception: {self.exception}")
             return
-        if self.overflow:
-            print("Overflow occurred. Result not written to register.")
-        self.overflow = 0  # Reset overflow flag after handling
+
         # print(control_signals["reg_dst"])
         if control_signals["reg_dst"]:
             regd = rd_index
         else:
-            regd = int(bin_code[16:21][::-1], 2)
+            regd = self.get_bits(bin_code, 16, 20)
+        # print(f"Writing to register index {regd} with value {alu_result}")
         if control_signals["reg_write"]:
             self.registers.set_register_by_index(regd, alu_result)
     def Instruction_Format(self, instruction):
@@ -88,7 +99,7 @@ class CPUCore:
         }
         op = []
         for i in range(6):
-            op.append(int(opcode[5-i]))
+            op.append(opcode & (1<<5-i))
         r_type, lw, sw, beq, addi = 0,0,0,0,0
         r_type = (not op[5]) and (not op[4]) and (not op[3]) and (not op[2]) and (not op[1]) and (not op[0]) #000000
         lw = op[5] and op[4] and (not op[3]) and (not op[2]) and (not op[1]) and op[0] #100011
@@ -119,45 +130,25 @@ class CPUCore:
         # print(f"ALU_control_unit: func_code={func_code}, alu_op1={alu_op1}, alu_op0={alu_op0}")
         signals = [0] * 4 # [ainvert,binvert, op1, op0]
         if alu_op1 ==1 and alu_op0 == 0:
-            if func_code == '100100': #and
+            if func_code == 0b100100: #and
                 # do nothing, default is [0,0,0,0]
                 pass
-            elif func_code == '100101': #or
+            elif func_code == 0b100101: #or
                 signals[3] = 1
-            elif func_code == '100000': #add
+            elif func_code == 0b100000: #add
                 signals[2] = 1
-            elif func_code == '100010': #sub
+            elif func_code == 0b100010: #sub
                 signals[1] = 1
                 signals[2] = 1
-            elif func_code == '100111': #nor
+            elif func_code == 0b100111: #nor
                 signals[0] = 1
                 signals[1] = 1
-            elif func_code == '101010': #slt
+            elif func_code == 0b101010: #slt
                 signals[1] = 1
                 signals[2] = 1
                 signals[3] = 1
         if alu_op1 ==1 and alu_op0 == 1:
             signals[2] = 1 #addi
-            print("hi")
-
-        # if opcode in ['and', 'or', 'add', 'sub', 'nor', 'slt', 'addi']: #plaintext ALU operations
-        #     if opcode == 'and':
-        #         # do nothing, default is 0,0
-        #         pass
-        #     elif opcode == 'or':
-        #         signals[3] = 1
-        #     elif opcode == 'add' or opcode == 'addi':
-        #         signals[2] = 1
-        #     elif opcode == 'sub':
-        #         signals[1] = 1
-        #         signals[2] = 1
-        #     elif opcode == 'nor':
-        #         signals[0] = 1
-        #         signals[1] = 1
-        #     elif opcode == 'slt':
-        #         signals[1] = 1
-        #         signals[2] = 1
-        #         signals[3] = 1
         return signals
     def ALU_32(self, table, op_a, op_b):
         op_a = op_a & 0xFFFFFFFF
@@ -210,108 +201,101 @@ class CPUCore:
 class Compiler:
     def __init__(self):
         self.reg_table = Registers()
-        self.instructions = []
-        self.nop = f'{0:06b}' + f'{0:05b}' + f'{0:05b}' + f'{0:05b}' + f'{0:05b}' + f'{0:06b}'
         self.exception = None
+        self.nop = 0
+        self.inst_map = {
+            'add':  (0b000000, 0b100000, 'R'),
+            'sub':  (0b000000, 0b100010, 'R'),
+            'and':  (0b000000, 0b100100, 'R'),
+            'or':   (0b000000, 0b100101, 'R'),
+            'nor':  (0b000000, 0b100111, 'R'),
+            'slt':  (0b000000, 0b101010, 'R'),
+            'sll':  (0b000000, 0b000000, 'R'),
+
+            'addi': (0b001000, 0b000000, 'I'),
+            'lw':   (0b100011, 0b000000, 'I'),
+            'sw':   (0b101011, 0b000000, 'I'),
+            'beq':  (0b000100, 0b000000, 'I'),
+        }
+    def compile_r_type(self, cmd,bin_code,func_code, inst_type): #R-type[inst rd rs rt/shamt]
+        if len(cmd) < 4:
+            self.exception = "Invalid R-type instruction format"
+            bin_code = self.nop
+            return bin_code
+        rd,rs,rt,shamt = 0,0,0,0
+        try:
+            rd = self.reg_table.name_map[cmd[1]]
+            rs = self.reg_table.name_map[cmd[2]] # op:6, rs:5, rt:5, rd:5, shamt:5, other:6
+            try:
+                shamt = int(cmd[3]) & 0x1F
+            except ValueError:
+                shamt = 0
+                rt = self.reg_table.name_map[cmd[3]]
+        except KeyError:
+            self.exception = "Invalid R-type instruction format"
+            bin_code = self.nop
+            return bin_code
+        bin_code |= rs << 21
+        bin_code |= rt << 16
+        bin_code |= rd << 11
+        bin_code |= shamt << 6
+        bin_code |= func_code
+        print(f"bin_code after R-type: {bin_code:032b}")
+        return bin_code
+    def compile_i_type(self, cmd,bin_code, inst_type): #I-type[inst rt rs imm]
+        if len(cmd) < 4:
+            self.exception = "Invalid I-type instruction format"
+            bin_code = self.nop
+            return bin_code
+        rt,rs,imm = 0,0,0
+        try:
+            rt = self.reg_table.name_map[cmd[1]]
+            rs = self.reg_table.name_map[cmd[2]] # op:6, rs:5, rt:5, rd:5, shamt:5, other:6
+            try:
+                imm = int(cmd[3]) & 0xFFFF
+            except ValueError:
+                imm = 0
+                rt = self.reg_table.name_map[cmd[3]]
+        except KeyError:
+            self.exception = "Invalid I-type instruction format"
+            bin_code = self.nop
+            return bin_code
+        bin_code |= rs << 21
+        bin_code |= rt << 16
+        bin_code |= imm
+        # print(f"bin_code after I-type: {bin_code:032b}")
+        return bin_code
     def compile(self, cmd):
         cmd = cmd.replace("$", "").replace(",", " ").replace("\t", " ").strip().split()
         print(f"Decoded command: {cmd}")
 
-        bin_code = '0'*WIDTH
+        bin_code = 0
         # print(f"bincode={bin_code[:6]}:{bin_code[6:11]}:{bin_code[11:16]}:{bin_code[16:21]}:{bin_code[21:26]}:{bin_code[26:]}")
-        bin_code = self.registers_to_bin(cmd, bin_code)
+        # bin_code = self.registers_to_bin(cmd, bin_code)
         # print(f"bincode={bin_code[:6]}:{bin_code[6:11]}:{bin_code[11:16]}:{bin_code[16:21]}:{bin_code[21:26]}:{bin_code[26:]}")
         inst = cmd[0].lower()
+        opcode = 0b000000
+        inst_type = None
         func_code = 0b000000
-        if  inst in ['and', 'or', 'add', 'sub', 'nor', 'slt']: #R-type[op:6,rs:5,rt:5,rd:5,shamt:5,funct:6]
-            if inst == 'and':
-                func_code = 0b100100
-            elif inst == 'or':
-                func_code = 0b100101
-            elif inst == 'add':
-                func_code = 0b100000
-            elif inst == 'sub':
-                func_code = 0b100010
-            elif inst == 'nor':
-                func_code = 0b100111
-            elif inst == 'slt':
-                func_code = 0b101010
-            else:
-                self.exception = "Invalid R-type instruction"
-                bin_code = self.nop
-                return bin_code
-            inst = f'{0:06b}'
-            bin_code = f'{inst}'+bin_code[6:26] + f'{func_code:06b}'
-        elif inst in ['addi']:
-            if inst == 'addi':
-                inst = f'{0b001000:06b}'
-            else:
-                self.exception = "Invalid I-type instruction"
-                bin_code = self.nop
-                return bin_code
-            try:
-                immt = int(cmd[3])
-                if immt > 32767 or immt < -32768:
-                    self.exception = "Immediate value out of range"
-                    bin_code = self.nop
-                    return bin_code
-                immt = immt & 0xFFFF
-                print(f"bin_code before: {bin_code}")
-                bin_code = f'{inst}'+bin_code[6:16]+f'{immt:016b}'
-                print(f"bin_code after: {bin_code}")
-            except (ValueError, TypeError):
-                self.exception = "Invalid immediate value"
-                bin_code = self.nop
-                return bin_code
-            # print(f"bincode={bin_code[:6]}:{bin_code[6:11]}:{bin_code[11:16]}:{bin_code[16:21]}:{bin_code[21:26]}:{bin_code[26:]}")
-        # elif inst in ['addi']:
-        #     inst = f'{0b00100000:06b}'
-        #     bin_code = bin_code[:6] + f'{int(cmd[1]):05b}' + bin_code[11:]
-        #     bin_code = bin_code[:11] + f'{int(cmd[2]):05b}' + bin_code[16:]
-        #     bin_code = bin_code[:16] + f'{int(cmd[3]):05b}' + bin_code[21:]
-        #     bin_code = bin_code[:21] + f'{int(cmd[4]):05b}' + bin_code[26:]
-        # elif inst in ['lw', 'sw']:
-        #     inst = bin(0b10001111)
-        #     bin_code = bin_code[:6] + f'{int(cmd[1]):05b}' + bin_code[11:]
-        #     bin_code = bin_code[:11] + f'{int(cmd[2]):05b}' + bin_code[16:]
-        #     bin_code = bin_code[:16] + f'{int(cmd[3]):05b}' + bin_code[21:]
-        #     bin_code = bin_code[:21] + f'{int(cmd[4]):05b}' + bin_code[26:]
-        # elif inst in ['beq']:
-        #     inst = bin(0b00000100)
+        if inst in self.inst_map:
+            opcode, func_code, inst_type = self.inst_map[inst]
         else:
-            self.exception = "Invalid opcode"
+            self.exception = "Invalid instruction"
             bin_code = self.nop
-        bin_code = bin_code[::-1] # little endian
-        # print(f"bincode={bin_code[:6]}:{bin_code[6:11]}:{bin_code[11:16]}:{bin_code[16:21]}:{bin_code[21:26]}:{bin_code[26:]}")
+            return bin_code
+        bin_code |= opcode << WIDTH - 6
+        # print(f"bin_code after opcode: {bin_code:032b}")
+        # print(f"Opcode: {opcode:06b}, Function code: {func_code:06b}, Instruction type: {inst_type}")
+        match  inst_type:
+            case 'R': 
+                bin_code = self.compile_r_type(cmd, bin_code,func_code, inst_type)
+            case 'I':
+                bin_code = self.compile_i_type(cmd, bin_code, inst_type)
+            case _:
+                self.exception = "Invalid instruction type"
+                bin_code = self.nop
         return bin_code
-    def registers_to_bin(self, cmd, bin_code):
-        rs,rt,rd,shamt=0,0,0,0
-        cmd_len = len(cmd)
-        if cmd_len > 1:
-            try:
-                rd = f'{self.reg_table.name_map[cmd[1]]& 0x1F:05b}'
-            except (ValueError, TypeError, KeyError):
-                return bin_code
-            bin_code = bin_code[:6] + rd + bin_code[11:] # op:6, rd:5, other:21
-        if cmd_len > 2:
-            try:
-                rs = f'{self.reg_table.name_map[cmd[2]]& 0x1F:05b}'
-            except (ValueError, TypeError, KeyError):
-                return bin_code
-            bin_code = bin_code[:6] + rs + bin_code[6:WIDTH-5] #op:6, rs:5, rd:5, other:16
-        if cmd_len > 3:
-            try:
-                rt = f'{self.reg_table.name_map[cmd[3]]& 0x1F:05b}'
-            except (ValueError, TypeError, KeyError):
-                return bin_code
-            bin_code = bin_code[:11] + rt + bin_code[11:WIDTH-5] # op:6, rs:5, rd:5, rt:5, other:11
-            try:
-                shamt_val = int(cmd[3]) & 0x1F
-            except (ValueError, TypeError):
-                return bin_code
-            shamt = f'{shamt_val:05b}'
-            bin_code = bin_code[:21] + shamt + bin_code[21:WIDTH-5] # op:6, rs:5, rd:5, rt:5, shamt:5, other:6
-        return bin_code
+
 
         
 def interface():
