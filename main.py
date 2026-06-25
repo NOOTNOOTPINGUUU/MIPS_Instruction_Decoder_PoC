@@ -38,7 +38,10 @@ class Memory:
             raise Exception(f"OutOfBoundsError: Cannot write memory out of bounds{hex(address)}")
         if address%4 != 0:
             raise Exception(f"Alignment Error: Cannot write word to unaligned address {hex(address)}")
+        print(f"Writing value {value} to address {hex(address)}")
         self.storage[address] = value& 0xFFFFFFFF
+        print(self.storage)
+
 class CPUCore:
     def __init__(self):
         self.registers = Registers()
@@ -52,9 +55,9 @@ class CPUCore:
         mask = (1 << length) - 1
         return (val >> start) & mask
     def execute(self, bin_code):
-        # IF
+        # ===IF===
         bin_code = self.Instruction_Format(bin_code)
-        # ID
+        # ===ID===
         print(f"Executing instruction: {bin_code:032b}")
         # print(f"self.get_bits(bin_code, 0, 5): {self.get_bits(bin_code, 26, 31):06b}")
         control_signals = self.control_unit(self.get_bits(bin_code, 26, 31))
@@ -68,20 +71,26 @@ class CPUCore:
         for i in range(16): #signed extension 16-bit to 32-bit
             immt |= sign_bit << i+16
         # print(f"imm: {immt}")
-        # EX
+        # ===EX===
+        alu_input = rData2
         # print(control_signals["alu_src"])
         if control_signals["alu_src"]:  #alu_src multiplexor
-            rData2 = immt  # immediate value
+            alu_input = immt  # immediate value
             # print(f"ALUSrc is 1, using constant {op_b} as op_b")
-        # print(self.get_bits(bin_code, 0, 5), control_signals["alu_op1"], control_signals["alu_op0"])
-        alu_result, zero_flag, self.overflow = self.alu.execute(rData1, rData2, self.get_bits(bin_code, 0, 5), control_signals["alu_op1"], control_signals["alu_op0"])
-        # print(f"ALU result: {alu_result}, zero_flag: {zero_flag}")
+        # print(f"rData1: {rData1}, rData2: {rData2},alu_input: {alu_input}, opcode: {self.get_bits(bin_code, 0, 5)}, alu_op1: {control_signals['alu_op1']}, alu_op0: {control_signals['alu_op0']}")
+        result, zero_flag, self.overflow = self.alu.execute(rData1, alu_input, self.get_bits(bin_code, 0, 5), control_signals["alu_op1"], control_signals["alu_op0"])
+        # print(f"ALU result: {result}, zero_flag: {zero_flag}")
         if self.overflow:
             print("Overflow occurred. Result not written to register.")
             self.overflow = 0  # Reset overflow flag after handling
             return
-        # MEM
-        # WB
+        # ===MEM===
+        rMData = 0
+        rMData = self.Data_Memory(result, rData2, control_signals["mem_read"], control_signals["mem_write"])
+        if control_signals["mem_to_reg"]:
+            print(f"Memory read: {rMData} from address {result}")
+            result = rMData
+        # ===WB===
         if self.exception:
             print(f"Exception: {self.exception}")
             return
@@ -91,9 +100,9 @@ class CPUCore:
             regd = rd_index
         else:
             regd = self.get_bits(bin_code, 16, 20)
-        # print(f"Writing to register index {regd} with value {alu_result}")
+        # print(f"Writing to register index {regd} with value {result}")
         if control_signals["reg_write"]:
-            self.registers.write_register(regd, alu_result)
+            self.registers.write_register(regd, result)
     def Instruction_Format(self, instruction):
 
         return instruction
@@ -139,6 +148,12 @@ class CPUCore:
         # print(f"r_type: {r_type}, lw: {lw}, sw: {sw}, beq: {beq}")
         # print(f"control_unit: {signals}")
         return signals
+    def Data_Memory(self, address, write_data, mem_read, mem_write):
+        if mem_read:
+            return self.memory.read(address)
+        if mem_write:
+            self.memory.write(address, write_data)
+            return 0
 class ALU:
     def __init__(self):
         self.exception = None
