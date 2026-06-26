@@ -11,10 +11,11 @@ A MIPS32 CPU Simulator implemented in Python. This project simulates the core ha
 - `add`/`sub` 
 - `and`/`or`/`nor`
 - `slt`
+- `syscall`(exit only)
 
 ### I-Type Instructions
 - `addi`
-- `lw`/`sw`
+- `lw`/`sw`/`beq`
 
 
 ## Requirement

@@ -113,7 +113,7 @@ class CPUCore:
             control_signals["reg_write"] = 0
             control_signals["mem_write"] = 0
             pc = self.EV_ADDRESS
-            print(f"EXL: {EXL}, EX_CODE: {EX_CODE}, pc: {pc}")
+            print(f"EXL: {EXL}, EX_CODE: {EX_CODE}, pc: {hex(pc)}")
         rData1 = self.registers.read_register(self.get_bits(bin_code, 21, 25))
         rData2 = self.registers.read_register(self.get_bits(bin_code, 16, 20))
         rd_index = self.get_bits(bin_code, 11, 15)
@@ -125,6 +125,10 @@ class CPUCore:
             immt |= sign_bit << i+16
         # print(f"imm: {immt}")
         # ===EX===
+
+        branch_address = immt << 2
+        branch_address = pc + branch_address
+
         alu_input = rData2
         # print(control_signals["alu_src"])
         if control_signals["alu_src"]:  #alu_src multiplexor
@@ -144,6 +148,8 @@ class CPUCore:
             pc = self.EV_ADDRESS
             EXL = 1
 
+        if control_signals["branch"] and zero_flag:
+            pc = branch_address
         rMData = 0
         if control_signals["mem_read"]==1 or control_signals["mem_write"]==1:
             rMData , self.memError, EX_CODE= self.Data_Memory(result, rData2, control_signals["mem_read"], control_signals["mem_write"],EXL, UM)
@@ -247,8 +253,11 @@ class ALU:
         # print(f"ALU_control_unit: func_code={func_code}, alu_op1={alu_op1}, alu_op0={alu_op0}")
         signals = [0] * 4 # [ainvert,binvert, op1, op0]
         if alu_op1 == 0 and alu_op0 == 0:
-            signals[2] = 1 #add
-        if alu_op1 ==1 and alu_op0 == 0:
+            signals[2] = 1  #add for lw, sw, addi
+        elif alu_op1 == 0 and alu_op0 == 1:
+            signals[1] = 1  #sub for beq
+            signals[2] = 1
+        elif alu_op1 ==1 and alu_op0 == 0:
             if func_code == 0b100100: #and
                 # do nothing, default is [0,0,0,0]
                 pass
@@ -374,20 +383,19 @@ class Compiler:
         rt,rs,imm = 0,0,0
         try:
             rt = self.reg_table.name_map[cmd[1]]
-            rs = self.reg_table.name_map[cmd[2]] # op:6, rs:5, rt:5, rd:5, shamt:5, other:6
-            try:
-                imm = int(cmd[3]) & 0xFFFF
-            except ValueError:
-                try:
-                    imm = int(cmd[3], 16) & 0xFFFF
-                except ValueError:
-                    imm = 0
-                    print(f"Invalid immediate value: {cmd[3]}. Defaulting to 0.")
-                    rt = self.reg_table.name_map[cmd[3]]
+            rs = self.reg_table.name_map[cmd[2]] # op:6, rs:5, rt:5, imm:16
+            # print(f"rs: {rs}, rt: {rt}, imm_str: {cmd[3]}")
+            imm = int(cmd[3],0) & 0xFFFF
         except KeyError:
             self.exception = "Invalid I-type instruction format: Invalid register name"
             bin_code = self.nop
             return bin_code
+        except ValueError:
+            self.exception = "Invalid I-type instruction format: Invalid immediate value"
+            bin_code = self.nop
+            return bin_code
+        if cmd[0].lower() == "beq":  # beq
+            rs,rt = rt,rs
         bin_code |= rs << 21
         bin_code |= rt << 16
         bin_code |= imm
@@ -510,6 +518,14 @@ sw   $s0, 12($sp)      # Memory[112] = 3
 # Calculate F(5)
 add  $s1, $s2, $s0     # $s1 = 2 + 3 = 5
 sw   $s1, 16($sp)      # Memory[116] = 5
+"""
+    code = """
+addi $t0, $zero, 5
+addi $t1, $zero, 5
+beq  $t0, $t1, 2     # should jump to 999 if $t0 == $t1
+addi $t2, $zero, 111   # this instruction should be skipped if branch is taken
+syscall
+addi $t2, $zero, 999   # this instruction should be executed if branch is taken
 """
     program = []
     print("Welcome to the command line interface. Type 'exit' to quit.")
