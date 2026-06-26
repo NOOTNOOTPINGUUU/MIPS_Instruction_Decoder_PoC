@@ -27,6 +27,7 @@ class Memory:
     def __init__(self):
         self.storage = {}
     def read(self, address):
+        self.exit_handle(address)
         if address < 0 or address >= 0xFFFFFFFF:
             raise Exception(f"OutOfBoundsError: Cannot read out of bounds memory{hex(address)}")
         if address%4 != 0:
@@ -40,15 +41,44 @@ class Memory:
         print(f"Writing value {value} to address {hex(address)}")
         self.storage[address] = value& 0xFFFFFFFF
         print(self.storage)
-
+    def exit_handle(self, address):
+        if address == 0x80000180:
+            print("Exception")
+            exit(0)
+class CP0:
+    def __init__(self):
+        self._regs = ZeroTouchGround([0]*WIDTH)
+        self.name_map = {
+            'BadVAddr': 8, 
+            'Status': 12,   #UM|EXL 
+            'Cause': 13,
+            'EPC': 14
+        }
+    def write_register(self, index, value):
+        self._regs[index] = value
+    def read_register(self, index):
+        return self._regs[index]
+    def to_user_mode(self):
+        self.write_register(self.name_map['Status'], (self._regs[self.name_map['Status']] & ~0b10010) | 0b10000)
+    def to_exception_mode(self):
+        self.write_register(self.name_map['Status'], (self._regs[self.name_map['Status']] & ~0b10010) | 0b10010)
+    def dump(self):
+        changed = {f"{name}": self._regs[idx] for name, idx in self.name_map.items()}
+        return changed
 class CPUCore:
     def __init__(self):
         self.registers = Registers()
         self.alu = ALU()
+        self.cp0 = CP0()
         self.pc = 0x00400000 #Program_Counter
         self.memory = Memory()
+        
         self.overflow = 0
+        self.memError = 0
+        
         self.exception = None
+        self.EV_ADDRESS = 0x80000180 # Exception Vector Address
+        self.cp0.to_user_mode()
     def get_bits(self,val, start, end): #support function to extract bits from a value
         length = end - start + 1
         mask = (1 << length) - 1
@@ -56,9 +86,15 @@ class CPUCore:
     def execute(self):
         # ===IF===
         bin_code = self.Instruction_MEM(self.pc)
+        EXL = self.get_bits(self.cp0.read_register(self.cp0.name_map['Status']), 3, 3)
+        UM = self.get_bits(self.cp0.read_register(self.cp0.name_map['Status']), 0, 0)
+        EX_CODE = self.get_bits(self.cp0.read_register(self.cp0.name_map['Cause']), 2, 6)
         pc = self.pc + 4
         # ===ID===
         print(f"Executing instruction: {bin_code:032b}")
+        if bin_code == 0x0000000C:
+            print(f"Exit by syscall")
+            exit(0)
         # print(f"self.get_bits(bin_code, 0, 5): {self.get_bits(bin_code, 26, 31):06b}")
         control_signals = self.control_unit(self.get_bits(bin_code, 26, 31))
         rData1 = self.registers.read_register(self.get_bits(bin_code, 21, 25))
@@ -80,20 +116,34 @@ class CPUCore:
         # print(f"rData1: {rData1}, rData2: {rData2},alu_input: {alu_input}, opcode: {self.get_bits(bin_code, 0, 5)}, alu_op1: {control_signals['alu_op1']}, alu_op0: {control_signals['alu_op0']}")
         result, zero_flag, self.overflow = self.alu.execute(rData1, alu_input, self.get_bits(bin_code, 0, 5), control_signals["alu_op1"], control_signals["alu_op0"])
         # print(f"ALU result: {result}, zero_flag: {zero_flag}")
+
+        # ===MEM===
         if self.overflow:
             print("Overflow occurred. Result not written to register.")
+            control_signals["reg_write"] = 0
+            control_signals["mem_write"] = 0
             self.overflow = 0  # Reset overflow flag after handling
-            return
-        # ===MEM===
+            EX_CODE = 12
+            pc = self.EV_ADDRESS
+
         rMData = 0
-        rMData = self.Data_Memory(result, rData2, control_signals["mem_read"], control_signals["mem_write"])
+        if control_signals["mem_read"]==1 or control_signals["mem_write"]==1:
+            rMData , self.memError, EX_CODE= self.Data_Memory(result, rData2, control_signals["mem_read"], control_signals["mem_write"],EXL, UM)
+        if self.memError:
+            control_signals["reg_write"] = 0
+            pc = self.EV_ADDRESS
+            EXL = 1
+
         if control_signals["mem_to_reg"]:
             print(f"Memory read: {rMData} from address {result}")
             result = rMData
         # ===WB===
         if self.exception:
             print(f"Exception: {self.exception}")
-            return
+            control_signals["reg_write"] = 0
+            control_signals["mem_write"] = 0
+            pc = self.EV_ADDRESS
+
 
         # print(control_signals["reg_dst"])
         if control_signals["reg_dst"]:
@@ -103,6 +153,9 @@ class CPUCore:
         # print(f"Writing to register index {regd} with value {result}")
         if control_signals["reg_write"]:
             self.registers.write_register(regd, result)
+        self.cp0.write_register(self.cp0.name_map['Cause'], EX_CODE<<2) 
+        if EXL:
+            self.cp0.to_exception_mode()
         self.pc = pc
     def Instruction_MEM(self, address):
         instruction = self.memory.read(address)
@@ -149,12 +202,20 @@ class CPUCore:
         # print(f"r_type: {r_type}, lw: {lw}, sw: {sw}, beq: {beq}")
         # print(f"control_unit: {signals}")
         return signals
-    def Data_Memory(self, address, write_data, mem_read, mem_write):
+    def Data_Memory(self, address, write_data, mem_read, mem_write, EXL, UM):
+        is_Kernal = (not UM) or EXL
+        if not is_Kernal and self.get_bits(address, 31, 31) == 1:
+            print(f"Address Error on Load/Store: {address} is out of range") #0x04 AdEL illegal memory access
+            return 0 ,1, 4
+        if address & 0x00000003 != 0:
+            print(f"Address Error on Load/Store: {address} must be word-aligned") #0x05 AdES misaligned memory
+            return 0 ,1, 5
+
         if mem_read:
-            return self.memory.read(address)
+            return self.memory.read(address) ,0, 0
         if mem_write:
             self.memory.write(address, write_data)
-            return 0
+            return 0 ,0, 0
 class ALU:
     def __init__(self):
         self.exception = None
@@ -248,6 +309,7 @@ class Compiler:
             'nor':  (0b000000, 0b100111, 'R'),
             'slt':  (0b000000, 0b101010, 'R'),
             'sll':  (0b000000, 0b000000, 'R'),
+            'syscall': (0b000000, 0b001100, 'R'),
 
             'addi': (0b001000, 0b000000, 'I'),
             'lw':   (0b100011, 0b000000, 'I'),
@@ -256,6 +318,8 @@ class Compiler:
         }
     def compile_r_type(self, cmd,bin_code,func_code): #R-type[inst rd rs rt/shamt]
         if len(cmd) < 4:
+            if cmd[0] == 'syscall':
+                return 0x0000000C # SYSCALL
             self.exception = "Invalid R-type instruction format"
             bin_code = self.nop
             return bin_code
@@ -361,6 +425,10 @@ class Loader:
         for i, instruction in enumerate(program):
             address = self.PC + i * 4
             self.memory.write(address, instruction)
+        self.memory.write(address+4, 0x0000000C)
+    def exception_loader(self):
+        pass
+
 def interface():
     CPU = CPUCore()
     registers = CPU.registers
@@ -434,15 +502,13 @@ sw   $s1, 16($sp)      # Memory[116] = 5
             compiler_32.exception = None
             continue
         loader.load_program(program)
-        for i in range(len(program)):
-            print(f"Instruction {i}: {program[i]:032b}")
+        while True:
             CPU.execute()
             if CPU.exception:
                 print(f"Error: {CPU.exception}")
                 CPU.exception = None
-                continue
-            display = registers.dump()
-
+                break
+        display = registers.dump()
         for i in range(0, len(display), 4):
             print(" ".join(f"{k}: {v}" for k, v in list(display.items())[i:i+4]))
 
