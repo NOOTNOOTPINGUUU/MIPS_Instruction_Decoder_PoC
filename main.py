@@ -38,13 +38,19 @@ class Memory:
             raise Exception(f"OutOfBoundsError: Cannot write memory out of bounds{hex(address)}")
         if address%4 != 0:
             raise Exception(f"Alignment Error: Cannot write word to unaligned address {hex(address)}")
-        print(f"Writing value {value} to address {hex(address)}")
+        # print(f"Writing value {value} to address {hex(address)}")
         self.storage[address] = value& 0xFFFFFFFF
-        print(self.storage)
+        # print(self.storage)
     def exit_handle(self, address):
         if address == 0x80000180:
             print("Exception")
+            display = self.dump()
+            for i in range(0, len(display), 4):
+                print(" ".join(f"{k}: {bin(v)}" for k, v in list(display.items())[i:i+4]))
             exit(0)
+    def dump(self):
+        changed = {f"M[{hex(k)}]": v for k, v in self.storage.items()}
+        return changed
 class CP0:
     def __init__(self):
         self._regs = ZeroTouchGround([0]*WIDTH)
@@ -86,17 +92,28 @@ class CPUCore:
     def execute(self):
         # ===IF===
         bin_code = self.Instruction_MEM(self.pc)
-        EXL = self.get_bits(self.cp0.read_register(self.cp0.name_map['Status']), 3, 3)
-        UM = self.get_bits(self.cp0.read_register(self.cp0.name_map['Status']), 0, 0)
+        EXL = self.get_bits(self.cp0.read_register(self.cp0.name_map['Status']), 1, 1)
+        UM = self.get_bits(self.cp0.read_register(self.cp0.name_map['Status']), 4, 4)
         EX_CODE = self.get_bits(self.cp0.read_register(self.cp0.name_map['Cause']), 2, 6)
         pc = self.pc + 4
+        print(f"EXL: {EXL}, UM: {UM}, EX_CODE: {EX_CODE}")
         # ===ID===
         print(f"Executing instruction: {bin_code:032b}")
-        if bin_code == 0x0000000C:
-            print(f"Exit by syscall")
-            exit(0)
+
+
         # print(f"self.get_bits(bin_code, 0, 5): {self.get_bits(bin_code, 26, 31):06b}")
         control_signals = self.control_unit(self.get_bits(bin_code, 26, 31))
+        if self.get_bits(bin_code, 26, 31) == 0 and self.get_bits(bin_code, 0, 5) == 0b001100:
+            print(f"Exit by syscall")
+            display = self.registers.dump()
+            for i in range(0, len(display), 4):
+                print(" ".join(f"{k}: {hex(v)}" for k, v in list(display.items())[i:i+4]))
+            EXL = 1
+            EX_CODE = 8
+            control_signals["reg_write"] = 0
+            control_signals["mem_write"] = 0
+            pc = self.EV_ADDRESS
+            print(f"EXL: {EXL}, EX_CODE: {EX_CODE}, pc: {pc}")
         rData1 = self.registers.read_register(self.get_bits(bin_code, 21, 25))
         rData2 = self.registers.read_register(self.get_bits(bin_code, 16, 20))
         rd_index = self.get_bits(bin_code, 11, 15)
@@ -125,6 +142,7 @@ class CPUCore:
             self.overflow = 0  # Reset overflow flag after handling
             EX_CODE = 12
             pc = self.EV_ADDRESS
+            EXL = 1
 
         rMData = 0
         if control_signals["mem_read"]==1 or control_signals["mem_write"]==1:
@@ -135,7 +153,7 @@ class CPUCore:
             EXL = 1
 
         if control_signals["mem_to_reg"]:
-            print(f"Memory read: {rMData} from address {result}")
+            print(f"Memory read: {bin(rMData)} from address {hex(result)}")
             result = rMData
         # ===WB===
         if self.exception:
@@ -205,10 +223,10 @@ class CPUCore:
     def Data_Memory(self, address, write_data, mem_read, mem_write, EXL, UM):
         is_Kernal = (not UM) or EXL
         if not is_Kernal and self.get_bits(address, 31, 31) == 1:
-            print(f"Address Error on Load/Store: {address} is out of range") #0x04 AdEL illegal memory access
+            print(f"Address Error on Load/Store: {hex(address)} is out of range") #0x04 AdEL illegal memory access
             return 0 ,1, 4
         if address & 0x00000003 != 0:
-            print(f"Address Error on Load/Store: {address} must be word-aligned") #0x05 AdES misaligned memory
+            print(f"Address Error on Load/Store: {hex(address)} must be word-aligned") #0x05 AdES misaligned memory
             return 0 ,1, 5
 
         if mem_read:
@@ -451,6 +469,29 @@ lw   $s3, 8($zero)      # read from Memory[8] to $s3
 
 """
     code = """
+addi $t0, $zero, -32768   # $t0 = 0xFFFF8000
+lw   $t1, 0($t0)          # user mode exception(AdEL)
+"""
+    code = """
+addi $t0, $zero, 32767
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0
+add  $t0, $t0, $t0 """
+    code = """
 addi $s0, $zero, 1     # F(1) = 1
 addi $s1, $zero, 1     # F(2) = 1
 addi $sp, $zero, 100   # push stack pointer to 100
@@ -470,7 +511,6 @@ sw   $s0, 12($sp)      # Memory[112] = 3
 add  $s1, $s2, $s0     # $s1 = 2 + 3 = 5
 sw   $s1, 16($sp)      # Memory[116] = 5
 """
-
     program = []
     print("Welcome to the command line interface. Type 'exit' to quit.")
     while (True):
@@ -508,9 +548,7 @@ sw   $s1, 16($sp)      # Memory[116] = 5
                 print(f"Error: {CPU.exception}")
                 CPU.exception = None
                 break
-        display = registers.dump()
-        for i in range(0, len(display), 4):
-            print(" ".join(f"{k}: {v}" for k, v in list(display.items())[i:i+4]))
+
 
 
 
