@@ -100,7 +100,9 @@ class CPUCore:
         print(f"EXL: {EXL}, UM: {UM}, EX_CODE: {EX_CODE}")
         # ===ID===
         print(f"Executing instruction: {bin_code:032b}")
-
+        jAddress = get_bits(bin_code, 0, 25)
+        jAddress = jAddress << 2
+        jAddress = (get_bits(self.pc, 28, 31) << 28) | jAddress
 
         # print(f"get_bits(bin_code, 0, 5): {get_bits(bin_code, 26, 31):06b}")
         control_signals = self.control_unit(get_bits(bin_code, 26, 31))
@@ -113,7 +115,6 @@ class CPUCore:
             EX_CODE = 0x08
             control_signals["reg_write"] = 0
             control_signals["mem_write"] = 0
-            pc = self.EV_ADDRESS
             print(f"EXL: {EXL}, EX_CODE: {EX_CODE}, pc: {hex(pc)}")
         rData1 = self.registers.read_register(get_bits(bin_code, 21, 25))
         rData2 = self.registers.read_register(get_bits(bin_code, 16, 20))
@@ -146,17 +147,17 @@ class CPUCore:
             control_signals["mem_write"] = 0
             self.overflow = 0  # Reset overflow flag after handling
             EX_CODE = 0x0C
-            pc = self.EV_ADDRESS
             EXL = 1
 
         if control_signals["branch"] and zero_flag:
             pc = branch_address
         rMData = 0
+        if control_signals["jump"]:
+            pc = jAddress
         if control_signals["mem_read"]==1 or control_signals["mem_write"]==1:
             rMData , self.memError, EX_CODE= self.Data_Memory(result, rData2, control_signals["mem_read"], control_signals["mem_write"],EXL, UM)
         if self.memError:
             control_signals["reg_write"] = 0
-            pc = self.EV_ADDRESS
             EXL = 1
 
         if control_signals["mem_to_reg"]:
@@ -167,8 +168,8 @@ class CPUCore:
             print(f"Exception: {self.exception}")
             control_signals["reg_write"] = 0
             control_signals["mem_write"] = 0
-            pc = self.EV_ADDRESS
-
+            EXL = 1
+        
 
         # print(control_signals["reg_dst"])
         if control_signals["reg_dst"]:
@@ -180,6 +181,7 @@ class CPUCore:
             self.registers.write_register(regd, result)
         self.cp0.write_register(self.cp0.name_map['Cause'], EX_CODE<<2) 
         if EXL:
+            pc = self.EV_ADDRESS
             self.cp0.write_register(self.cp0.name_map['EPC'], self.pc)
             self.cp0.to_exception_mode()
         
@@ -198,7 +200,8 @@ class CPUCore:
             "branch": 0,
             "ext_op": 0,
             "alu_op1": 0,
-            "alu_op0": 0
+            "alu_op0": 0,
+            "jump": 0
         }
         op = []
         for i in range(6):
@@ -208,6 +211,7 @@ class CPUCore:
         lw = op[5] and op[4] and (not op[3]) and (not op[2]) and (not op[1]) and op[0] #100011
         sw = op[5] and op[4] and (not op[3]) and op[2] and (not op[1]) and op[0] #101011
         beq = (not op[5]) and (not op[4]) and op[3] and (not op[2]) and (not op[1]) and (not op[0]) #000100
+        j = (not op[5]) and op[4] and (not op[3]) and (not op[2]) and (not op[1]) and (not op[0]) #000010
         addi = (not op[5]) and (not op[4]) and (not op[3]) and op[2] and (not op[1]) and (not op[0]) #00100
         # r_type = bool(r_type)
         # lw = bool(lw)
@@ -223,6 +227,7 @@ class CPUCore:
         signals["ext_op"] = 0
         signals["alu_op1"] = r_type
         signals["alu_op0"] = beq
+        signals["jump"] = j
         for key,value in signals.items():
             signals[key] = 1 if value else 0 # Formatting for clear looks <3
         # print(f"op: {op}")
@@ -345,6 +350,8 @@ class Compiler:
             'lw':   (0b100011, 0b000000, 'I'),
             'sw':   (0b101011, 0b000000, 'I'),
             'beq':  (0b000100, 0b000000, 'I'),
+
+            'j':    (0b000010, 0b000000, 'J'),
         }
     def compile_r_type(self, cmd,bin_code,func_code): #R-type[inst rd rs rt/shamt]
         if len(cmd) < 4:
@@ -404,6 +411,20 @@ class Compiler:
         bin_code |= imm
         # print(f"bin_code after I-type: {bin_code:032b}")
         return bin_code
+    def compile_j_type(self, cmd,bin_code): #J-type[inst address]
+        if len(cmd) < 2:
+            self.exception = "Invalid J-type instruction format"
+            bin_code = self.nop
+            return bin_code
+        try:
+            address = int(cmd[1],0)
+            address = get_bits(address, 2, 27)
+        except ValueError:
+            self.exception = "Invalid J-type instruction format: Invalid address"
+            bin_code = self.nop
+            return bin_code
+        bin_code |= address
+        return bin_code
     def compile(self, cmd):
         cmd = cmd.split("#")[0]  # Remove comments
         cmd = cmd.replace("$", "").replace(",", " ").replace("\t", " ").strip().split()
@@ -434,6 +455,8 @@ class Compiler:
                 bin_code = self.compile_r_type(cmd, bin_code,func_code)
             case 'I':
                 bin_code = self.compile_i_type(cmd, bin_code)
+            case 'J':
+                bin_code = self.compile_j_type(cmd, bin_code)
             case _:
                 self.exception = "Invalid instruction type"
                 bin_code = self.nop
@@ -570,6 +593,13 @@ addi $t2, $zero, 111   # this instruction should be skipped if branch is taken
 syscall
 addi $t2, $zero, 999   # this instruction should be executed if branch is taken
 """
+
+    code = """
+j 0x00400008
+addi $t0, $zero, 111
+addi $t1, $zero, 999
+"""
+
     program = []
     print("Welcome to the command line interface. Type 'exit' to quit.")
     while (True):

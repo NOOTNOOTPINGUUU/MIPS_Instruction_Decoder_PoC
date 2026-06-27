@@ -17,6 +17,8 @@ A MIPS32 CPU Simulator implemented in Python. This project simulates the core ha
 - `addi`
 - `lw`/`sw`/`beq`
 
+### J-Type Instructions
+- `j`(j address for now only)
 
 ## Requirement
 - Python 3.x
@@ -43,5 +45,5 @@ sw   $s2, 8($sp)       # Memory[108] = 2
 Type `registers` or `regs` in the CLI after execution to inspect the 32-bit state of all CPU registers.
 
 ## To-Do
-- J-Type/remaining Instructions support
+- remaining Instructions support
 - Pipelining implementation
