@@ -97,7 +97,8 @@ class CPUCore:
         UM = get_bits(self.cp0.read_register(self.cp0.name_map['Status']), 4, 4)
         EX_CODE = get_bits(self.cp0.read_register(self.cp0.name_map['Cause']), 2, 6)
         pc = self.pc + 4
-        print(f"EXL: {EXL}, UM: {UM}, EX_CODE: {EX_CODE}")
+        print(f"PC: {hex(self.pc)}, Instruction: {bin_code:032b}, EXL: {EXL}, UM: {UM}, EX_CODE: {EX_CODE}")
+        # print(f"EXL: {EXL}, UM: {UM}, EX_CODE: {EX_CODE}")
         # ===ID===
         print(f"Executing instruction: {bin_code:032b}")
         jAddress = get_bits(bin_code, 0, 25)
@@ -125,11 +126,11 @@ class CPUCore:
         sign_bit = (immt >> 15) & 1
         for i in range(16): #signed extension 16-bit to 32-bit
             immt |= sign_bit << i+16
-        # print(f"imm: {immt}")
+        print(f"imm: {immt}")
         # ===EX===
 
         branch_address = immt << 2
-        branch_address = pc + branch_address
+        branch_address = (pc + branch_address)& 0xFFFFFFFF
 
         alu_input = rData2
         # print(control_signals["alu_src"])
@@ -151,6 +152,7 @@ class CPUCore:
 
         if control_signals["branch"] and zero_flag:
             pc = branch_address
+            print(f"Branch taken to address {hex(pc)}, originally {hex(self.pc)}")
         rMData = 0
         if control_signals["jump"]:
             pc = jAddress
@@ -333,8 +335,11 @@ class ALU:
             self.exception = "Invalid ALU operation"
 class Compiler:
     def __init__(self, registers):
+        self.label_table = {}
         self.reg_table = registers
         self.exception = None
+        self.errors = []
+        self.virtual_address = 0x00400000
         self.nop = 0
         self.inst_map = {
             'add':  (0b000000, 0b100000, 'R'),
@@ -380,7 +385,7 @@ class Compiler:
         bin_code |= func_code
         # print(f"bin_code after R-type: {bin_code:032b}")
         return bin_code
-    def compile_i_type(self, cmd,bin_code): #I-type[inst rt rs imm]
+    def compile_i_type(self, cmd,bin_code,offset): #I-type[inst rt rs imm]
         if cmd[2].find("(") != -1 and cmd[2].find(")") != -1: #lw/sw format: lw $t0, 4($t1)
             cmd.insert(3, cmd[2].split("(")[0])
             cmd[2] = cmd[2].split("(")[1].split(")")[0]
@@ -392,10 +397,20 @@ class Compiler:
 
         rt,rs,imm = 0,0,0
         try:
-            rt = self.reg_table.name_map[cmd[1]]
-            rs = self.reg_table.name_map[cmd[2]] # op:6, rs:5, rt:5, imm:16
+            rt = self.reg_table.name_map[cmd[1]]&0x1F
+            rs = self.reg_table.name_map[cmd[2]]&0x1F # op:6, rs:5, rt:5, imm:16
             # print(f"rs: {rs}, rt: {rt}, imm_str: {cmd[3]}")
-            imm = int(cmd[3],0) & 0xFFFF
+            if cmd[0].lower() == "beq":
+                rs,rt = rt,rs
+                try:
+                    print(self.label_table)
+                    imm = self.label_table[cmd[3]][1] - (offset + 1) # label offset
+                    print(f"Label '{cmd[3]}' found in label_table. Using offset {imm}.")
+                except KeyError:
+                    print(f"Label '{cmd[3]}' not found in label_table. Attempting to parse as an immediate value.")
+                    imm = int(cmd[3], 0) & 0xFFFF
+            else:
+                imm = int(cmd[3],0) & 0xFFFF
         except KeyError:
             self.exception = "Invalid I-type instruction format: Invalid register name"
             bin_code = self.nop
@@ -404,11 +419,10 @@ class Compiler:
             self.exception = "Invalid I-type instruction format: Invalid immediate value"
             bin_code = self.nop
             return bin_code
-        if cmd[0].lower() == "beq":  # beq
-            rs,rt = rt,rs
         bin_code |= rs << 21
         bin_code |= rt << 16
-        bin_code |= imm
+        bin_code |= imm&0xFFFF
+        # print(f"rs: {rs << 21}, rt: {rt}, imm: {imm}")
         # print(f"bin_code after I-type: {bin_code:032b}")
         return bin_code
     def compile_j_type(self, cmd,bin_code): #J-type[inst address]
@@ -417,15 +431,19 @@ class Compiler:
             bin_code = self.nop
             return bin_code
         try:
-            address = int(cmd[1],0)
-            address = get_bits(address, 2, 27)
-        except ValueError:
-            self.exception = "Invalid J-type instruction format: Invalid address"
-            bin_code = self.nop
-            return bin_code
+            address = self.label_table[cmd[1]][0]
+        except KeyError:
+            try:
+                print(f"Label '{cmd[1]}' not found in label_table. Attempting to parse as an address.")
+                address = int(cmd[1],0)
+            except ValueError:
+                self.exception = "Invalid J-type instruction format: Invalid address"
+                bin_code = self.nop
+                return bin_code
+        address = get_bits(address, 2, 27)
         bin_code |= address
         return bin_code
-    def compile(self, cmd):
+    def compile(self, cmd,offset):
         cmd = cmd.split("#")[0]  # Remove comments
         cmd = cmd.replace("$", "").replace(",", " ").replace("\t", " ").strip().split()
         if not cmd:
@@ -444,7 +462,7 @@ class Compiler:
         if inst in self.inst_map:
             opcode, func_code, inst_type = self.inst_map[inst]
         else:
-            self.exception = "Invalid instruction"
+            self.exception = "Invalid instruction(unsupported or undefined instruction)"
             bin_code = self.nop
             return bin_code
         bin_code |= opcode << WIDTH - 6
@@ -454,7 +472,7 @@ class Compiler:
             case 'R': 
                 bin_code = self.compile_r_type(cmd, bin_code,func_code)
             case 'I':
-                bin_code = self.compile_i_type(cmd, bin_code)
+                bin_code = self.compile_i_type(cmd, bin_code,offset)
             case 'J':
                 bin_code = self.compile_j_type(cmd, bin_code)
             case _:
@@ -462,6 +480,55 @@ class Compiler:
                 bin_code = self.nop
         return bin_code
 
+    def label_mapping(self,label,label_table,offset):
+        if not label:
+            return label_table
+        if not label or label in label_table:
+            self.exception = f"Invalid label: Label '{label}' is empty or already exists"
+            return label_table
+        label_table[label] = offset * 4 + self.virtual_address,offset
+        print(f"Label '{label}' mapped to address {hex(label_table[label][0])} and offset {label_table[label][1]}.")
+        return label_table
+
+    def run(self, code):
+        process_code = []
+        program = []
+        self.label_table = {}
+        offset = 0
+        label = ""
+        for i in range(0, len(code.splitlines())):
+            line = code.splitlines()[i]
+            if line.strip() == "":
+                continue
+            offset += 1
+            line = line.split("#")[0]  # Remove comments
+            line = line.replace("$", "").replace(",", " ").replace("\t", " ").strip()
+            print(f"Compiling instruction {i}: {line}")
+            label = line.split(":")[0] if ":" in line else ""
+            line = line.split(":")[1].strip() if ":" in line else line
+            if line.strip() == "":
+                offset -= 1
+            if label:
+                self.label_table = self.label_mapping(label,self.label_table,offset)
+                if self.exception:
+                    self.errors.append(self.exception+f" at instruction '{code.splitlines()[i]}' on line {offset+2}")
+                    self.exception = None
+            if line.strip() != "":
+                process_code.append(line)
+        offset = 0
+        for line in process_code:
+            bin_code = 0
+            bin_code = self.compile(line,offset)
+            program.append(bin_code)
+            if self.exception:
+                self.exception+= f" at instruction '{line}' on line {offset+1}"
+                self.errors.append(self.exception)
+                self.exception = None
+            offset += 1
+        # print(f"Processed code: {process_code}")
+       
+
+        return program
 class Loader:
     def __init__(self, CPU):
         self.CPU = CPU
@@ -477,8 +544,8 @@ class Loader:
         for i, instruction in enumerate(program):
             address = self.PC + i * 4
             self.memory.write(address, instruction)
-        self.memory.write(address+4, 0b00100000000000100000000000001010)
-        self.memory.write(address+8, 0x0000000C)
+        self.memory.write(address+4, 0b00100000000000100000000000001010) #addi $v0, $zero, 10
+        self.memory.write(address+8, 0x0000000C) #syscall
     def exception_loader(self):
         pass
 class SimpleOS:
@@ -545,23 +612,10 @@ lw   $t1, 0($t0)          # user mode exception(AdEL)
 """
     code = """
 addi $t0, $zero, 32767
+jump_label:
 add  $t0, $t0, $t0
-add  $t0, $t0, $t0
-add  $t0, $t0, $t0
-add  $t0, $t0, $t0
-add  $t0, $t0, $t0
-add  $t0, $t0, $t0
-add  $t0, $t0, $t0
-add  $t0, $t0, $t0
-add  $t0, $t0, $t0
-add  $t0, $t0, $t0
-add  $t0, $t0, $t0
-add  $t0, $t0, $t0
-add  $t0, $t0, $t0
-add  $t0, $t0, $t0
-add  $t0, $t0, $t0
-add  $t0, $t0, $t0
-add  $t0, $t0, $t0 """
+j jump_label
+"""
     code = """
 addi $s0, $zero, 1     # F(1) = 1
 addi $s1, $zero, 1     # F(2) = 1
@@ -595,9 +649,51 @@ addi $t2, $zero, 999   # this instruction should be executed if branch is taken
 """
 
     code = """
-j 0x00400008
-addi $t0, $zero, 111
-addi $t1, $zero, 999
+addi $t0, $zero, 5
+addi $t1, $zero, 5
+addi $t2, $zero, 0
+addi $t3, $zero, 1
+loop:
+add $t2, $t2, $t1
+sub $t0, $t0, $t3
+beq $t0, $zero, end_loop
+j loop
+addi $t4, $zero, 999
+end_loop:
+
+"""
+
+#     code = """
+# addi $t0, $zero, 10
+# addi $a0, $zero, 1
+# addi $t1, $zero, 0
+# addi $t2, $zero, 1
+# loop:
+#     add $t3, $t1, $t2
+#     add  $t1, $zero, $t2
+#     add $t2, $zero, $t3
+#     sub $t0, $t0, $a0
+#     slt $t3, $t0, $zero
+#     beq  $t3, $zero, loop
+# """
+    code = """
+addi $t0, $zero, 6
+addi $t0, $t0, -2
+addi $t1, $zero, 0
+sw $t1, 0($sp)
+addi $t1, $zero, 1
+addi $sp, $sp, -4
+sw $t1, 0($sp)
+Loop:
+lw $t1, 4($sp)
+lw $t2, 0($sp)
+add $t3, $t1, $t2
+addi $sp, $sp, -4
+sw $t3, 0($sp)
+addi $t0, $t0, -1
+slt $t4, $t0, $zero
+beq $t4, $zero, Loop
+
 """
 
     program = []
@@ -624,16 +720,11 @@ addi $t1, $zero, 999
             for i in range(0, len(display), 4):
                 print(" ".join(f"{k}: {hex(v)}" for k, v in list(display.items())[i:i+4]))
             continue
-        for i in range(0, len(code.splitlines())):
-            line = code.splitlines()[i]
-            if line.strip() == "":
-                continue
-            # print(f"Compiling instruction {i}: {line}")
-            machine_code = compiler_32.compile(line)
-            program.append(machine_code)
-        if compiler_32.exception:
-            print(f"Error: {compiler_32.exception}")
-            compiler_32.exception = None
+        program = compiler_32.run(code)
+        if compiler_32.errors:
+            for error in compiler_32.errors:
+                print(f"Error: {error}")
+            compiler_32.errors = []
             continue
         loader.load_program(program)
         OS.run()

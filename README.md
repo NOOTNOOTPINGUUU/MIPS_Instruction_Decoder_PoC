@@ -15,10 +15,10 @@ A MIPS32 CPU Simulator implemented in Python. This project simulates the core ha
 
 ### I-Type Instructions
 - `addi`
-- `lw`/`sw`/`beq`
+- `lw`/`sw`/`beq`(label support!)
 
 ### J-Type Instructions
-- `j`(j address for now only)
+- `j`(label support!)
 
 ## Requirement
 - Python 3.x
